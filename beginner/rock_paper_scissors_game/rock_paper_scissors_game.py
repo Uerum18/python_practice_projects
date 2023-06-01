@@ -54,29 +54,43 @@ def determine_winner(user_choice, python_choice, cheat):
         return -10
 
 
-def play_game():
+def play_round():
     user_choice = get_user_choice()
     python_choice = random.randint(0, 2)
     cheat = print_choices(user_choice, python_choice)
     results = determine_winner(user_choice, python_choice, cheat)
     return results
 
+def play_game():
+    score = {'Your Score': 0, 'Python Score': 0}
+    while score['Your Score'] < 3 and score['Python Score'] < 3:
+        result = play_round()
+        if result == 0:
+            print(score)
+            continue
+        elif result == 1:
+            score['Your Score'] += 1
+            print(score)
+        elif result == -1:
+            score['Python Score'] += 1
+            print(score)
+        else:
+            print(f'You are cheating! Game over.')
+            break
 
-score = {'Your Score': 0, 'Python Score': 0}
-while score['Your Score'] < 3 and score['Python Score'] < 3:
-    result = play_game()
-    if result == 0:
-        print(score)
+continue_playing = True
+while continue_playing:
+    play_game()
+    playing = input(f'Do you want to play again? Type "y" for Yes, "n" for No. ').lower()
+    if playing in ['n', 'no']:
+        print('Good Bye!')
+        continue_playing = False
+    elif playing in ['y', 'yes']:
         continue
-    elif result == 1:
-        score['Your Score'] += 1
-        print(score)
-    elif result == -1:
-        score['Python Score'] += 1
-        print(score)
     else:
-        print(f'You are cheating! Game over.')
-        break
+        print('Incorrect input. Good Bye!')
+        continue_playing = False
+
 
 
 

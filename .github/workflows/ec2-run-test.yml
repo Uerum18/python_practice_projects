@@ -1,0 +1,171 @@
+name: Run tests
+
+on:
+  workflow_dispatch:
+    inputs:
+      tags:
+        description: |
+          Test scenario tags
+          (leave blank for full run)
+        required: false
+      send_slack:
+        description: 'Send Slack message'
+        type: boolean
+        default: true
+        required: false
+  schedule:
+    - cron: "0 2 * * *"
+
+
+jobs:
+  start-runner:
+    name: Start self-hosted EC2 runner
+    timeout-minutes: 10
+    runs-on: ubuntu-latest
+    outputs:
+      label: ${{ steps.start-ec2-runner.outputs.label }}
+      ec2-instance-id: ${{ steps.start-ec2-runner.outputs.ec2-instance-id }}
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+      - name: Start EC2 runner
+        id: start-ec2-runner
+        uses: machulav/ec2-github-runner@v2
+        with:
+          mode: start
+          github-token: ${{ secrets.GH_TOKEN }}
+          ec2-image-id: ${{ vars.EC2_AMI_ID }}
+          ec2-instance-type: ${{ vars.EC2_INSTANCE_TYPE }}
+          subnet-id: ${{ vars.EC2_SUBNET_ID }}
+          security-group-id: ${{ vars.EC2_SECURITY_GROUP_ID }}
+
+  install_dependencies:
+    name: Install Dependencies
+    needs: start-runner
+    runs-on: ${{ needs.start-runner.outputs.label }}
+    steps:
+      - name: Update package lists
+        run: sudo apt-get update
+
+      - name: Download Google Chrome
+        run: wget https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
+
+      - name: Install dependencies and Google Chrome
+        run: |
+          sudo apt-get install -y git libicu-dev docker.io ./google-chrome-stable_current_amd64.deb
+          sudo systemctl unmask docker.service
+          sudo systemctl unmask docker.socket
+
+  run_tests:
+    name: Run Tests
+    timeout-minutes: 300
+    needs:
+      - start-runner  # required to start the main job when the runner is ready
+      - install_dependencies
+    runs-on: ${{ needs.start-runner.outputs.label }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Set GitHub variables in .env file
+        run: |
+          echo "TAGS=${{ github.event.inputs.tags }}" >> .env
+          echo "CHROMEDRIVER_VERSION=${{ vars.CHROMEDRIVER_VERSION }}" >> .env
+          echo "BASE_URL=${{ vars.BASE_URL }}" >> .env
+          echo "BE_SECRET=${{ secrets.BE_SECRET }}" >> .env
+          echo "CONSOLE_ADMIN_USER_EMAIL=${{ vars.CONSOLE_ADMIN_USER_EMAIL }}" >> .env
+          echo "CONSOLE_ADMIN_USER_PASSWORD=${{ secrets.CONSOLE_ADMIN_USER_PASSWORD }}" >> .env
+          echo "OP_BASE_URL=${{ vars.OP_BASE_URL }}" >> .env
+          echo "OP_BE_SECRET=${{ secrets.OP_BE_SECRET }}" >> .env
+          echo "OP_ADMIN_USER_EMAIL=${{ vars.OP_ADMIN_USER_EMAIL }}" >> .env
+          echo "OP_ADMIN_USER_PASSWORD=${{ secrets.OP_ADMIN_USER_PASSWORD }}" >> .env
+          echo "DSU_BASE_URL=${{ vars.DSU_BASE_URL }}" >> .env
+          echo "DSU_BE_SECRET=${{ secrets.DSU_BE_SECRET }}" >> .env
+          echo "DSU_ADMIN_USER_EMAIL=${{ vars.DSU_ADMIN_USER_EMAIL }}" >> .env
+          echo "DSU_ADMIN_USER_PASSWORD=${{ secrets.DSU_ADMIN_USER_PASSWORD }}" >> .env
+
+      - name: Install Python 3
+        uses: actions/setup-python@v4
+        with:
+          python-version: 3.8
+
+      - name: Install dependencies 
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -q
+
+      - name: Run tests
+        if: always()
+        id: run_tests
+        run: |
+          ./run.sh
+        continue-on-error: true
+
+      - name: Send Slack message
+        if: ${{ github.event.inputs.send_slack == '' || github.event.inputs.send_slack == 'true' }}
+        uses: slackapi/slack-github-action@v1.24.0
+        with:
+          payload-file-path: "./reports/slack_message.json"
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+      - name: Checkout gh-pages branch
+        uses: actions/checkout@v3
+        if: always()
+        continue-on-error: true
+        with:
+          ref: gh-pages
+          path: gh-pages
+
+      - name: Setup Allure report for deploy
+        uses: simple-elf/allure-report-action@master
+        if: always()
+        id: allure-report
+        with:
+          allure_results: "./reports/allure-results"
+          gh_pages: gh-pages
+          allure_report: allure-report
+          allure_history: allure-history
+          keep_reports: 4
+
+      - name: Set home path
+        if: always()
+        run: |
+          echo "HOME=/actions-runner/_work/databench-automation/databench-automation" >> $GITHUB_ENV
+
+      - name: Deploy Allure report to GitHub Pages
+        if: always()
+        uses: peaceiris/actions-gh-pages@v3
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_branch: gh-pages
+          publish_dir: allure-history
+
+  stop-runner:
+    name: Stop self-hosted EC2 runner
+    needs:
+      - start-runner # required to get output from the start-runner job
+      - run_tests # required to wait when the main job is done
+    runs-on: ubuntu-latest
+    if: ${{ always() }} # required to stop the runner even if the error happened in the previous jobs
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+      - name: Stop EC2 runner
+        uses: machulav/ec2-github-runner@v2
+        with:
+          mode: stop
+          github-token: ${{ secrets.GH_TOKEN }}
+          label: ${{ needs.start-runner.outputs.label }}
+          ec2-instance-id: ${{ needs.start-runner.outputs.ec2-instance-id }}
